@@ -1,0 +1,17 @@
+# 编译产物
+bin/
+obj/
+dist/
+*.user
+*.suo
+.vs/
+
+# 运行时数据
+logs/
+*.log
+diag.txt
+config.json
+
+# 系统
+Thumbs.db
+.DS_Store
