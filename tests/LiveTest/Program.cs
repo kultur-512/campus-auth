@@ -1,7 +1,7 @@
 using CampusAuth;
 
 // 用法：LiveTest <portal> <username> <password> [ac_id]
-string portal = args.Length > 0 ? args[0] : "http://172.16.154.130";
+string portal = args.Length > 0 ? args[0] : "http://10.10.10.10";
 string user = args.Length > 1 ? args[1] : "";
 string pass = args.Length > 2 ? args[2] : "";
 int acid = args.Length > 3 ? int.Parse(args[3]) : 1;
