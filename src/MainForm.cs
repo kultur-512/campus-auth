@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Microsoft.Win32;
 
 namespace CampusAuth;
@@ -7,6 +8,15 @@ public class MainForm : Form
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValue = "CampusAuth";
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetGuiResources(IntPtr hProcess, uint uiFlags);
+
+    /// <summary>按颜色缓存托盘图标，避免反复创建 HICON 把 GDI 句柄耗光。</summary>
+    private static readonly Dictionary<int, Icon> IconCache = new();
 
     private readonly AppConfig _cfg;
     private readonly Guardian _guardian;
@@ -42,6 +52,7 @@ public class MainForm : Form
     private ToolStripMenuItem? _miStatus;
 
     private GuardState _state = GuardState.Stopped;
+    private Color _trayIconColor = Color.Empty;
     private string _detail = "";
     private bool _suppressAutoStartEvent;
 
@@ -75,7 +86,7 @@ public class MainForm : Form
         Log.Written += OnLogWritten;
 
         _tick.Interval = 1000;
-        _tick.Tick += (_, _) => UpdateStats();
+        _tick.Tick += (_, _) => { UpdateStats(); CheckResourceUsage(); };
         _tick.Start();
 
         Log.Cleanup();
@@ -329,6 +340,18 @@ public class MainForm : Form
             return;
         }
 
+        try
+        {
+            RefreshState(state, message);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("刷新界面失败：" + ex.Message);
+        }
+    }
+
+    private void RefreshState(GuardState state, string message)
+    {
         _state = state;
         _detail = message;
 
@@ -349,7 +372,11 @@ public class MainForm : Form
 
         if (_tray != null)
         {
-            _tray.Icon = MakeIcon(color);
+            if (_trayIconColor != color)
+            {
+                _trayIconColor = color;
+                _tray.Icon = MakeIcon(color);
+            }
             _tray.Text = "校园网自动认证 · " + text;
         }
         if (_miStatus != null) _miStatus.Text = text + " · " + message;
@@ -362,6 +389,25 @@ public class MainForm : Form
         _btnStop.Enabled = running || state == GuardState.Paused;
         if (_miPause != null)
             _miPause.Text = state == GuardState.Paused ? "恢复自动认证" : "暂停自动认证";
+    }
+
+    private DateTime _lastResCheck = DateTime.MinValue;
+
+    /// <summary>定期检查 GDI/USER 句柄数，防止再出现画不出界面的情况。</summary>
+    private void CheckResourceUsage()
+    {
+        if ((DateTime.Now - _lastResCheck).TotalMinutes < 10) return;
+        _lastResCheck = DateTime.Now;
+        try
+        {
+            using var proc = Process.GetCurrentProcess();
+            uint gdi = GetGuiResources(proc.Handle, 0);
+            uint user = GetGuiResources(proc.Handle, 1);
+            Log.Debug($"资源占用 GDI={gdi} USER={user}");
+            if (gdi > 6000 || user > 6000)
+                Log.Warn($"GDI/USER 句柄偏高（GDI={gdi} USER={user}），可能存在资源泄漏");
+        }
+        catch { }
     }
 
     private void UpdateStats()
@@ -732,6 +778,9 @@ public class MainForm : Form
 
     private static Icon MakeIcon(Color color)
     {
+        int key = color.ToArgb();
+        if (IconCache.TryGetValue(key, out var cached)) return cached;
+
         using var bmp = new Bitmap(32, 32);
         using (var g = Graphics.FromImage(bmp))
         {
@@ -749,6 +798,21 @@ public class MainForm : Form
             using var dotBrush = new SolidBrush(Color.White);
             g.FillEllipse(dotBrush, 14.2f, 22.2f, 3.6f, 3.6f);
         }
-        return Icon.FromHandle(bmp.GetHicon());
+
+        // GetHicon 得到的句柄必须手动销毁，否则每次调用都会泄漏一个 USER/GDI 对象
+        IntPtr handle = bmp.GetHicon();
+        Icon icon;
+        try
+        {
+            using var tmp = Icon.FromHandle(handle);
+            icon = (Icon)tmp.Clone();      // Clone 之后才能安全销毁原句柄
+        }
+        finally
+        {
+            DestroyIcon(handle);
+        }
+
+        IconCache[key] = icon;
+        return icon;
     }
 }
